@@ -6,14 +6,24 @@
 import os
 import sys
 
+import logging
 import serial
 
 from datetime import datetime
 
-
-rawfilename = "maser_logs.txt"
+logfilename = "/var/log/maser.log"
 metrics_dir = "/var/lib/node_exporter/textfile_collector/"
 metrics_prefix = "maser"
+
+# Create logger
+logger = logging.getLogger(__name__)
+logfmt = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
+
+logfile_handler = logging.FileHandler(logfilename)
+logfile_handler.setFormatter(logfmt)
+logger.addHandler(logfile_handler)
+
+logger.setLevel(logging.DEBUG)
 
 
 analog_chan_sets = {
@@ -37,6 +47,7 @@ def log_maser_metrics(com_port):
         Path to serial device where data comes in.
     """
 
+    # Open serial port with settings 2400/7-N-1
     ser = serial.Serial(
         port=com_port,
         baudrate=2400,
@@ -45,28 +56,37 @@ def log_maser_metrics(com_port):
         bytesize=serial.SEVENBITS,
     )
 
-    print("Connected to: " + ser.portstr)
-
-    rawfile = open(rawfilename, "a")
+    logger.info("Connected to: " + ser.portstr)
 
     line = ""
 
+    # Keep going until keyboard interrupt
     try:
         while True:
+            # Read byte from serial port. Blocks until one byte is read.
             byte = ser.read().decode()
-            rawfile.write(byte)
-            rawfile.flush()
 
+            # Add byte to line
             line += byte
+
+            # Detect end of line from line feed character
             if byte == "\n":
+                # Strip carriage return and line feed from line
                 line = line.strip("\r\n")
+
+                # Write line to logs
+                logger.info(line)
+
+                # Process line for metrics collection
                 detect_metric_line(line)
+
+                # Reset line variable
                 line = ""
 
     except KeyboardInterrupt:
-        print("Logging stopped")
+        logger.info("Logging stopped")
 
-    rawfile.close()
+    # Close serial port
     ser.close()
 
 
@@ -78,8 +98,6 @@ def detect_metric_line(line):
     line : str
         Line of raw maser output.
     """
-
-    print("Line: " + line)
 
     if "SYN" in line:
         parse_status_line1(line)

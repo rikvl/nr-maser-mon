@@ -11,17 +11,22 @@ import serial
 
 from datetime import datetime
 
-logfilename = "/var/log/maser.log"
+logfilename = "/var/log/maser/maser-reply.log"
 metrics_dir = "/var/lib/node_exporter/textfile_collector/"
 metrics_prefix = "maser"
 
 # Create logger
 logger = logging.getLogger(__name__)
-logfmt = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
 
+logfile_format = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
 logfile_handler = logging.FileHandler(logfilename)
-logfile_handler.setFormatter(logfmt)
+logfile_handler.setFormatter(logfile_format)
 logger.addHandler(logfile_handler)
+
+logstrm_format = logging.Formatter("%(message)s")
+logstrm_handler = logging.StreamHandler()
+logstrm_handler.setFormatter(logstrm_format)
+logger.addHandler(logstrm_handler)
 
 logger.setLevel(logging.DEBUG)
 
@@ -38,33 +43,50 @@ analog_chan_sets = {
 }
 
 
-def log_maser_metrics(com_port):
+def log_maser_metrics(com_port_maser, com_port_nrcan):
     """Log metrics of NR Hydrogen Maser
 
     Parameters
     ----------
-    com_port : str
-        Path to serial device where data comes in.
+    com_port_maser : str
+        Path to serial device connected to maser.
+    com_port_nrcan : str
+        Path to serial device connected to NRCan machine.
     """
 
     # Open serial port with settings 2400/7-N-1
-    ser = serial.Serial(
-        port=com_port,
+    ser_maser = serial.Serial(
+        port=com_port_maser,
         baudrate=2400,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
         bytesize=serial.SEVENBITS,
     )
+    logger.info("Connected to Maser: " + ser_maser.portstr)
 
-    logger.info("Connected to: " + ser.portstr)
+    # Open serial port with settings 2400/7-N-1
+    ser_nrcan = serial.Serial(
+        port=com_port_nrcan,
+        baudrate=2400,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.SEVENBITS,
+    )
+    logger.info("Connected to NRCan: " + ser_nrcan.portstr)
 
     line = ""
 
     # Keep going until keyboard interrupt
     try:
         while True:
-            # Read byte from serial port. Blocks until one byte is read.
-            byte = ser.read().decode()
+            # Read raw byte from serial port. Blocks until one byte is read.
+            raw_byte = ser_maser.read()
+
+            # Send raw byte to NRCan
+            ser_nrcan.write(raw_byte)
+
+            # Decode raw byte
+            byte = raw_byte.decode()
 
             # Add byte to line
             line += byte
@@ -84,10 +106,11 @@ def log_maser_metrics(com_port):
                 line = ""
 
     except KeyboardInterrupt:
-        logger.info("Logging stopped")
+        logger.info("Relay from maser to NRCan stopped")
 
     # Close serial port
-    ser.close()
+    ser_maser.close()
+    ser_nrcan.close()
 
 
 def detect_metric_line(line):
@@ -315,5 +338,6 @@ def write_metrics(file_id, data_string):
 
 
 if __name__ == "__main__":
-    com_port = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB0"
-    sys.exit(log_maser_metrics(com_port=com_port))
+    com_port_maser = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB1"
+    com_port_nrcan = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
+    sys.exit(log_maser_metrics(com_port_maser=com_port_maser, com_port_nrcan=com_port_nrcan))

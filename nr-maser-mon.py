@@ -3,15 +3,15 @@
 # Requirement: pyserial
 #
 
-import os
-import sys
-
 import logging
+import os
 import serial
+import sys
+import threading
 
 from datetime import datetime
 
-logfilename = "/var/log/maser/maser-reply.log"
+logfilename = "/var/log/maser.log"
 metrics_dir = "/var/lib/node_exporter/textfile_collector/"
 metrics_prefix = "maser"
 
@@ -30,7 +30,7 @@ logger.addHandler(logstrm_handler)
 
 logger.setLevel(logging.DEBUG)
 
-
+# Names of annalog channel sets and names of individual analog channels
 analog_chan_sets = {
     "VOLTAGES": ["  p28  ", "  p18  ", "  p5   ", "  n18  ", "VACION ", "THRMREF", "  p00  ", " p2 REF"],
     "BUFFERS ": ["RCVR1  ", "TRANS  ", "SYNTH  ", "DIST   ", "  1    ", "  2    ", "  3    ", "  4    "],
@@ -43,7 +43,7 @@ analog_chan_sets = {
 }
 
 
-def log_maser_metrics(com_port_maser, com_port_nrcan):
+def main(com_port_maser, com_port_nrcan):
     """Log metrics of NR Hydrogen Maser
 
     Parameters
@@ -54,63 +54,124 @@ def log_maser_metrics(com_port_maser, com_port_nrcan):
         Path to serial device connected to NRCan machine.
     """
 
-    # Open serial port with settings 2400/7-N-1
-    ser_maser = serial.Serial(
-        port=com_port_maser,
-        baudrate=2400,
-        parity=serial.PARITY_NONE,
-        stopbits=serial.STOPBITS_ONE,
-        bytesize=serial.SEVENBITS,
-    )
-    logger.info("Connected to Maser: " + ser_maser.portstr)
+    # Serial port settings: 2400/7-N-1
+    baudrate = 2400
+    bytesize = serial.SEVENBITS
+    parity = serial.PARITY_NONE
+    stopbits = serial.STOPBITS_ONE
 
-    # Open serial port with settings 2400/7-N-1
+    # Open serial port to NRCan
     ser_nrcan = serial.Serial(
         port=com_port_nrcan,
-        baudrate=2400,
-        parity=serial.PARITY_NONE,
-        stopbits=serial.STOPBITS_ONE,
-        bytesize=serial.SEVENBITS,
+        baudrate=baudrate,
+        parity=parity,
+        stopbits=stopbits,
+        bytesize=bytesize,
     )
-    logger.info("Connected to NRCan: " + ser_nrcan.portstr)
+    logger.info("Connected to NRCan on " + ser_nrcan.portstr)
+
+    # Open serial port to maser
+    ser_maser = serial.Serial(
+        port=com_port_maser,
+        baudrate=baudrate,
+        parity=parity,
+        stopbits=stopbits,
+        bytesize=bytesize,
+    )
+    logger.info("Connected to Maser on " + ser_maser.portstr)
+
+    # Create lock to serialize writes to log file
+    lock = threading.Lock()
+
+    # Create thread to relay messages from NRCan to maser
+    nrcan_to_maser_thread = threading.Thread(
+        target=relay_nrcan_to_maser,
+        args=(ser_maser, ser_nrcan, lock)
+    )
+    nrcan_to_maser_thread.daemon = True
+    nrcan_to_maser_thread.start()
+
+    # Create thread to relay messages from maser to NRCan
+    maser_to_nrcan_thread = threading.Thread(
+        target=relay_maser_to_nrcan,
+        args=(ser_maser, ser_nrcan, lock)
+    )
+    maser_to_nrcan_thread.daemon = True
+    maser_to_nrcan_thread.start()
+
+    # Main thread keeps going until keyboard interrupt
+    try:
+        while True:
+            pass
+
+    except KeyboardInterrupt:
+        logger.info("Relay and logging stopped by keyboard interrupt")
+
+        # Close serial port
+        ser_maser.close()
+        ser_nrcan.close()
+
+
+def relay_nrcan_to_maser(ser_maser, ser_nrcan, lock):
+    """Relay messages from NRCan to NR Hydrogen Maser and log them"""
 
     line = ""
 
-    # Keep going until keyboard interrupt
-    try:
-        while True:
-            # Read raw byte from serial port. Blocks until one byte is read.
-            raw_byte = ser_maser.read()
+    while True:
+        # Read raw byte from serial port. Blocks until one byte is read.
+        raw_byte = ser_nrcan.read()
 
-            # Send raw byte to NRCan
-            ser_nrcan.write(raw_byte)
+        # Send raw byte to maser
+        ser_maser.write(raw_byte)
 
-            # Decode raw byte
-            byte = raw_byte.decode()
+        # Decode raw byte
+        byte = raw_byte.decode()
 
-            # Add byte to line
-            line += byte
+        # Add byte to line
+        line += byte
 
-            # Detect end of line from line feed character
-            if byte == "\n":
-                # Strip carriage return and line feed from line
-                line = line.strip("\r\n")
-
+        # Detect end of input from F or D character
+        if byte == "F" or byte == "D":
+            with lock:
                 # Write line to logs
-                logger.info(line)
+                logger.info("NRCan: " + line)
 
-                # Process line for metrics collection
-                detect_metric_line(line)
+            # Reset line variable
+            line = ""
 
-                # Reset line variable
-                line = ""
 
-    except KeyboardInterrupt:
-        logger.info("Relay from maser to NRCan stopped")
+def relay_maser_to_nrcan(ser_maser, ser_nrcan, lock):
+    """Relay messages from NR Hydrogen Maser to NRCan and log and process them"""
 
-    # Close serial port
-    ser_maser.close()
-    ser_nrcan.close()
+    line = ""
+
+    while True:
+        # Read raw byte from serial port. Blocks until one byte is read.
+        raw_byte = ser_maser.read()
+
+        # Send raw byte to NRCan
+        ser_nrcan.write(raw_byte)
+
+        # Decode raw byte
+        byte = raw_byte.decode()
+
+        # Add byte to line
+        line += byte
+
+        # Detect end of line from line feed character
+        if byte == "\n":
+            # Strip carriage return and line feed from line
+            line = line.strip("\r\n")
+
+            with lock:
+                # Write line to logs
+                logger.info("Maser: " + line)
+
+            # Process line for metrics collection
+            detect_metric_line(line)
+
+            # Reset line variable
+            line = ""
 
 
 def detect_metric_line(line):
@@ -340,4 +401,4 @@ def write_metrics(file_id, data_string):
 if __name__ == "__main__":
     com_port_maser = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB1"
     com_port_nrcan = sys.argv[2] if len(sys.argv) > 2 else "/dev/ttyUSB0"
-    sys.exit(log_maser_metrics(com_port_maser=com_port_maser, com_port_nrcan=com_port_nrcan))
+    sys.exit(main(com_port_maser=com_port_maser, com_port_nrcan=com_port_nrcan))
